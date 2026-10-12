@@ -1,7 +1,8 @@
-"""Local, noiseless simulation with qoro-maestro 0.3.5.
+"""Local, noiseless simulation with qoro-maestro 0.3.6.
 
 Qiskit builds the benchmark circuits; OpenQASM 3 preserves mid-circuit measurements
 and classical feed-forward when translating them to Maestro's native circuits.
+Includes built-in causal cone (lightcone) reduction and invariant subspace (symmetry) finding.
 No Aer simulator is used. Aer noise models are not supported by this adapter.
 """
 
@@ -18,69 +19,21 @@ from .aer import local_job_id, stored_counts
 from .base import Backend, reverse_keys
 
 
-def check_rank(checks) -> int:
-    """Return the GF(2) rank of the binary check matrix using bitwise elimination."""
-    basis = {}
-    for term in checks:
-        value = sum(1 << int(q) for q in term)
-        while value:
-            pivot = value.bit_length() - 1
-            if pivot in basis:
-                value ^= basis[pivot]
-            else:
-                basis[pivot] = value
-                break
-    return len(basis)
-
-
-def evolve_check_subspace(code, depth: int, delta: float = 0.5) -> np.ndarray:
-    """Return amplitudes in |b> = prod_j P_j**b_j |+>**n (b_j is bit j).
-
-    Independent binary check rows make these states orthonormal. On this basis,
-    P_j acts as X_j and physical X_q acts as prod_{j:q in check_j} Z_j.
-    Both alternating layers preserve the subspace, whose initial state is |0>.
-    """
-    from ..lrqaoa import angles
-
-    rank = check_rank(code.checks)
-    if rank != code.n_checks:
-        raise ValueError("check subspace requires linearly independent Z checks")
-    if rank > 22:
-        raise ValueError("check subspace limits the effective statevector to 22 qubits")
-    gammas, betas = angles(depth, delta)
-    labels = np.arange(1 << rank, dtype=np.uint32)
-    mixer = np.zeros(1 << rank, dtype=float)
-    for q in range(code.n_data):
-        parity = np.zeros(1 << rank, dtype=np.uint32)
-        for j, term in enumerate(code.checks):
-            if q in term:
-                parity ^= (labels >> j) & 1
-        mixer += 1 - 2 * parity.astype(float)
-    state = np.zeros(1 << rank, dtype=np.complex128)
-    state[0] = 1.0
-    for gamma, beta in zip(gammas, betas):
-        for j, weight in enumerate(code.weights):
-            blocks = state.reshape(-1, 2, 1 << j)
-            lo, hi = blocks[:, 0, :].copy(), blocks[:, 1, :].copy()
-            co, si = np.cos(gamma * weight), -1j * np.sin(gamma * weight)
-            blocks[:, 0, :] = co * lo + si * hi
-            blocks[:, 1, :] = si * lo + co * hi
-        state *= np.exp(1j * beta * mixer)
-    return state
-
-
-def check_subspace_energy(code, depth: int, delta: float = 0.5) -> float:
-    """Exact energy in the check-generated subspace without state truncation or shot noise."""
-    state = evolve_check_subspace(code, depth, delta)
-    energy = 0.0
-    for j, weight in enumerate(code.weights):
-        blocks = state.reshape(-1, 2, 1 << j)
-        energy += weight * 2 * np.vdot(blocks[:, 0, :], blocks[:, 1, :]).real
-    return float(energy)
+def _ensure_gpu(cfg) -> None:
+    try:
+        import maestro
+        if getattr(cfg, "simulator_type", None) == getattr(maestro.SimulatorType, "Gpu", None):
+            maestro.init_gpu()
+    except Exception:
+        pass
 
 
 def estimate_maestro(circuit, observables: list[str], config=None):
-    """Evaluate exact expectation values without shots using Maestro's native estimate API."""
+    """Evaluate exact expectation values without shots using Maestro's native estimate API.
+
+    Maestro 0.3.6 natively applies causal cone reduction and invariant subspace
+    detection (auto_reduce) according to the SimulatorConfig.
+    """
     try:
         import maestro
     except ImportError as exc:
@@ -90,11 +43,10 @@ def estimate_maestro(circuit, observables: list[str], config=None):
     if config is not None and not isinstance(config, maestro.SimulatorConfig):
         raise TypeError("config must be a maestro.SimulatorConfig")
     cfg = copy.copy(config) if config is not None else maestro.SimulatorConfig()
-    if config is None and circuit.num_qubits > 20:
+    if config is None and circuit.num_qubits > 20 and not cfg.auto_reduce:
         cfg.simulation_type = maestro.SimulationType.MatrixProductState
 
-    if getattr(cfg, "simulator_type", None) == getattr(maestro.SimulatorType, "Gpu", None):
-        maestro.init_gpu()
+    _ensure_gpu(cfg)
 
     mc = maestro.QasmToCirc().parse_and_translate(qasm3.dumps(circuit))
     result = mc.estimate(observables, config=cfg)
@@ -128,13 +80,12 @@ def build_ladder_circuit(code, depth: int, delta: float = 0.5, order: list[int] 
 
 def maestro_energy(code, depth: int, delta: float = 0.5, config=None, use_subspace: bool = True,
                    ladder: bool = False, order: list[int] | None = None) -> float:
-    """Return ideal LR-QAOA energy, using the exact check-subspace reduction when eligible."""
-    if use_subspace and not ladder and order is None and delta == 0.5 and getattr(code, "checks", None) is not None:
-        try:
-            return check_subspace_energy(code, depth, delta)
-        except (ValueError, AttributeError):
-            pass
+    """Return ideal LR-QAOA energy evaluated via Maestro's native estimate engine.
 
+    Leverages Maestro 0.3.6's native invariant subspace finding (auto_reduce) and
+    causal cone reduction to evaluate exact check expectation values without state truncation
+    or shot noise.
+    """
     if ladder or order is not None:
         qc = build_ladder_circuit(code, depth, delta, order)
     else:
@@ -145,7 +96,14 @@ def maestro_energy(code, depth: int, delta: float = 0.5, config=None, use_subspa
         "".join("Z" if q in term else "I" for q in range(code.n_data))
         for term in code.checks
     ]
-    exp_vals = estimate_maestro(qc, observables, config=config)
+    cfg = copy.copy(config) if config is not None else None
+    if not use_subspace:
+        if cfg is None:
+            import maestro
+            cfg = maestro.SimulatorConfig(auto_reduce=False)
+        else:
+            cfg.auto_reduce = False
+    exp_vals = estimate_maestro(qc, observables, config=cfg)
     return float(np.dot(code.weights, exp_vals))
 
 
@@ -166,8 +124,7 @@ def run_maestro(circuits, shots, config=None, seed=None):
 
     if config is not None and not isinstance(config, maestro.SimulatorConfig):
         raise TypeError("config must be a maestro.SimulatorConfig")
-    if getattr(config, "simulator_type", None) == getattr(maestro.SimulatorType, "Gpu", None):
-        maestro.init_gpu()
+    _ensure_gpu(config)
     base_seed = seed if seed is not None else getattr(config, "seed", None)
     out = []
     for i, qc in enumerate(circuits):
@@ -268,6 +225,3 @@ class MaestroBackend(Backend):
                      ladder: bool = False, order: list[int] | None = None) -> float:
         return maestro_energy(code, depth, delta, config=self.config, use_subspace=use_subspace,
                               ladder=ladder, order=order)
-
-
-

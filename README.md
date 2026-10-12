@@ -54,7 +54,7 @@ Run the tests with
 python -m pytest
 ```
 
-For local simulation with [Maestro 0.3.5](https://pypi.org/project/qoro-maestro/0.3.5/),
+For local simulation with [Maestro 0.3.6](https://pypi.org/project/qoro-maestro/0.3.6/),
 install `pip install -e ".[maestro]"` and use `MaestroBackend` in the same workflow:
 
 ```python

@@ -110,24 +110,24 @@ def test_invalid_shots(shots):
         run_maestro([], shots)
 
 
-def test_check_rank_and_subspace_energy():
-    from qecbench.backends.maestro import check_rank, check_subspace_energy, maestro_energy
+def test_maestro_native_reduction_and_energy():
+    from qecbench.backends.maestro import maestro_energy
     from qecbench.lrqaoa import diagonal_statevector_energy
 
     # Color code distance 3: 7 data qubits, 3 checks
     code3 = codes.color_code(3)
-    assert check_rank(code3.checks) == 3
-    energy_subspace = check_subspace_energy(code3, depth=3)
     energy_ref = diagonal_statevector_energy(code3.hamiltonian, code3.n_data, depth=3)
-    assert abs(energy_subspace - energy_ref) < 1e-12
+
+    backend = MaestroBackend()
+    # Test via MaestroBackend.ideal_energy (uses Maestro native auto_reduce + causal cone)
+    assert abs(backend.ideal_energy(code3, depth=3) - energy_ref) < 1e-12
 
     # Color code distance 7: 37 data qubits, 18 checks
     code7 = codes.color_code(7)
-    assert check_rank(code7.checks) == 18
-    energy7 = check_subspace_energy(code7, depth=1)
+    energy7 = backend.ideal_energy(code7, depth=1)
     assert abs(energy7 - 1.0574878372) < 1e-6
 
-    # Test via MaestroBackend.ideal_energy
-    backend = MaestroBackend()
-    assert abs(backend.ideal_energy(code3, depth=3) - energy_ref) < 1e-12
+    # Ladder circuit execution
+    energy_ladder = backend.ideal_energy(code3, depth=1, use_subspace=False, ladder=True)
+    assert abs(energy_ladder - 1.1331695485) < 1e-6
 

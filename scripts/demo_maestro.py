@@ -1,7 +1,7 @@
 """Demonstration of MaestroBackend for simulation and exact reference evaluation.
 
 Shows:
-1. Exact check-subspace reduction for 37-qubit colour code d=7 in ~0.1 s.
+1. Native symmetry (auto_reduce) and lightcone reduction for 37-qubit colour code d=7 in ~0.1 s.
 2. Dynamic circuit simulation with mid-circuit measurements and feed-forward.
 3. Native exact observable expectation value estimation without shot noise.
 """
@@ -24,8 +24,8 @@ def main():
     print(f"Vendor:          {backend.vendor}")
     print(f"Simulated:       {backend.simulated}")
 
-    # 2. Exact Check-Subspace Reduction (Fast Reference Evaluation)
-    print("\n--- 1. Exact Reference Energy (Check-Subspace Reduction) ---")
+    # 2. Exact Check-Subspace Reduction (Fast Reference Evaluation via native auto_reduce)
+    print("\n--- 1. Exact Reference Energy (Maestro Native Symmetry & Lightcone Reduction) ---")
     code7 = codes.color_code(7)
     print(f"Code: {code7.name} ({code7.n_data} physical data qubits, {code7.n_checks} checks)")
 
